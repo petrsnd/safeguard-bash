@@ -6,6 +6,28 @@ description: >-
   to add new commands safely.
 ---
 # safeguard-bash Architecture
+
+## Windows checkout / CRLF
+
+When this repository is checked out on Windows (or with `core.autocrlf=true`),
+all `.sh` files will have CRLF line endings. Bash cannot execute scripts with
+`\r\n` — you will see errors like `$'\r': command not found`.
+
+Before running any script from a Windows checkout in WSL or Linux:
+
+```bash
+# One-time fix for a working copy
+find . -name "*.sh" -exec sed -i 's/\r$//' {} \;
+
+# Or copy to a temp directory and fix there
+cp -r . /tmp/sg-bash && find /tmp/sg-bash -name "*.sh" -exec sed -i 's/\r$//' {} \;
+cd /tmp/sg-bash
+```
+
+The `.gitattributes` file should enforce LF for shell scripts in the
+repository, but the working copy on Windows may still have CRLF until the
+files are re-checked out with the correct settings.
+
 ## 1. Entry point / public API surface (script layout)
 The public surface is `src/`. Everything in `src/` except `src/utils/` is meant
 to be an executable command.

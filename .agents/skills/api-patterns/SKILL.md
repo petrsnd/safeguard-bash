@@ -41,6 +41,24 @@ Resource Owner grant type to be enabled on the appliance.
 echo "MyPassword" | connect-safeguard.sh -a <appliance> -i local -u Admin -p
 ```
 
+### Non-interactive login (piped password)
+
+For scripting, pipe the password via stdin using the `-p` flag:
+
+```bash
+echo "Admin123" | src/connect-safeguard.sh -a 192.168.117.15 -i local -u Admin -p
+```
+
+The `-p` flag means "read password from stdin" (not "prompt for password").
+Without `-X`, this creates a login file (`~/.safeguard_login`) that subsequent
+commands pick up automatically — no need to pass credentials again.
+
+To create an explicit login file without the default path:
+
+```bash
+echo "Admin123" | src/connect-safeguard.sh -a 192.168.117.15 -i local -u Admin -p -O /tmp/my-login
+```
+
 ### 2. Certificate
 
 Client certificate + private key, provider set to `certificate`.
@@ -240,6 +258,20 @@ invoke-safeguard-method.sh -s core -m GET \
 invoke-safeguard-method.sh -s core -m GET \
     -U "Users?filter=Name%20eq%20'Admin'"
 ```
+
+### Query parameters
+
+Query parameters go IN the URL, not as separate flags:
+
+```bash
+# Correct — filter in the URL
+src/invoke-safeguard-method.sh -s core -m GET -U "Assets?filter=Name%20eq%20'MyAsset'"
+
+# Filter with URL encoding
+src/invoke-safeguard-method.sh -s core -m GET -U "Users?fields=Id,Name&filter=Disabled%20eq%20false"
+```
+
+There is no separate `-q` or `--query` flag for query parameters.
 
 ### URL Encoding Convention
 
