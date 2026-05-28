@@ -56,6 +56,7 @@ AccessToken=
 StoreLoginFile=true
 
 . "$ScriptDir/utils/loginfile.sh"
+. "$ScriptDir/utils/redact-sensitive.sh"
 
 get_rsts_token()
 {
@@ -86,7 +87,16 @@ EOF
             # ignore certificate errors when using client certificate authentication. This works around that
             # problem by calling OpenSSL directly and manually formulating an HTTP request.
             #   see https://github.com/curl/curl/issues/1411
-            StsResponse=$(cat <<EOF | openssl s_client -connect $Appliance:443 -quiet -crlf -key $PKey -cert $Cert -pass pass:$Pass 2>&1
+            local PassFile
+            local PassArgs=()
+            if [ -n "$Pass" ]; then
+                PassFile=$(write_pass_file "$Pass")
+                PassArgs=(-pass "file:$PassFile")
+            else
+                PassArgs=(-pass "pass:")
+            fi
+            trap 'rm -f "$PassFile"' RETURN
+            StsResponse=$(cat <<EOF | openssl s_client -connect $Appliance:443 -quiet -crlf -key $PKey -cert $Cert "${PassArgs[@]}" 2>&1
 POST /RSTS/oauth2/token HTTP/1.1
 Host: $Appliance
 User-Agent: curl/7.47.0
@@ -98,6 +108,8 @@ Content-Length: 84
 {"grant_type":"client_credentials","scope":"rsts:sts:primaryproviderid:certificate"}
 EOF
             )
+            rm -f "$PassFile"
+            trap - RETURN
         fi
         if [ $? -ne 0 ]; then
             >&2 echo "Failed to get access token from appliance token service"

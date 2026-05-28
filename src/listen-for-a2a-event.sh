@@ -52,6 +52,7 @@ if [ $(curl --version | grep "libcurl" | $SED -e 's,curl [0-9]*\.\([0-9]*\).* (.
 fi
 
 . "$ScriptDir/utils/loginfile.sh"
+. "$ScriptDir/utils/redact-sensitive.sh"
 
 require_args()
 {
@@ -78,7 +79,16 @@ get_connection_token()
 {
     # This call does not require an authorization header
     if $UseOpenSslSclient; then
-        TokenResponse=$(cat <<EOF | openssl s_client -connect $Appliance:443 -quiet -crlf -key $PKey -cert $Cert -pass pass:$Pass 2>&1
+        local _PassFile
+        local _PassArgs=()
+        if [ -n "$Pass" ]; then
+            _PassFile=$(write_pass_file "$Pass")
+            _PassArgs=(-pass "file:$_PassFile")
+        else
+            _PassArgs=(-pass "pass:")
+        fi
+        trap 'rm -f "$_PassFile" 2>/dev/null' RETURN
+        TokenResponse=$(cat <<EOF | openssl s_client -connect $Appliance:443 -quiet -crlf -key $PKey -cert $Cert "${_PassArgs[@]}" 2>&1
 POST /service/a2a/signalr/negotiate?negotiateVersion=1 HTTP/1.1
 Host: $Appliance
 User-Agent: curl/7.47.0
@@ -108,7 +118,16 @@ EOF
 negotiate_connection()
 {
     if $UseOpenSslSclient; then
-        NegotiateResponse=$(cat <<EOF | openssl s_client -connect $Appliance:443 -quiet -crlf -key $PKey -cert $Cert -pass pass:$Pass 2>&1
+        local _PassFile
+        local _PassArgs=()
+        if [ -n "$Pass" ]; then
+            _PassFile=$(write_pass_file "$Pass")
+            _PassArgs=(-pass "file:$_PassFile")
+        else
+            _PassArgs=(-pass "pass:")
+        fi
+        trap 'rm -f "$_PassFile" 2>/dev/null' RETURN
+        NegotiateResponse=$(cat <<EOF | openssl s_client -connect $Appliance:443 -quiet -crlf -key $PKey -cert $Cert "${_PassArgs[@]}" 2>&1
 POST /service/a2a/signalr$Params HTTP/1.1
 Host: $Appliance
 User-Agent: curl/7.47.0
@@ -188,7 +207,15 @@ if $UseOpenSslSclient; then
         >&2 echo "Using openssl s_client with this script requires the stdbuf utility, please install it."
         exit 1
     fi
-    cat <<EOF | stdbuf -o0 -e0 openssl s_client -connect $Appliance:443 -crlf -quiet -key $PKey -cert $Cert -pass pass:$Pass 2>&1 \
+    ListenPassArgs=()
+    if [ -n "$Pass" ]; then
+        ListenPassFile=$(write_pass_file "$Pass")
+        ListenPassArgs=(-pass "file:$ListenPassFile")
+    else
+        ListenPassArgs=(-pass "pass:")
+    fi
+    trap 'rm -f "$ListenPassFile" 2>/dev/null' EXIT
+    cat <<EOF | stdbuf -o0 -e0 openssl s_client -connect $Appliance:443 -crlf -quiet -key $PKey -cert $Cert "${ListenPassArgs[@]}" 2>&1 \
         | $SED -u -e '/{.*}/!d' | while read line; do echo $line | $PRETTYPRINT ; done
 GET /service/a2a/signalr$Params HTTP/1.1
 Host: $Appliance
