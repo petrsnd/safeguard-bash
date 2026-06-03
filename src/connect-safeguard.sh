@@ -463,6 +463,11 @@ EOF
         VerificationUriComplete=$(echo "$DeviceResponse" | sed -n 's/.*"verification_uri_complete":"\([^"]*\)".*/\1/p')
         ExpiresIn=$(echo "$DeviceResponse" | sed -n 's/.*"expires_in":\([0-9]*\).*/\1/p')
         Interval=$(echo "$DeviceResponse" | sed -n 's/.*"interval":\([0-9]*\).*/\1/p')
+        # JSON optionally escapes forward slashes as \/. jq -r unescapes those
+        # automatically, but our raw sed extraction does not, so undo the most
+        # common JSON string escapes that can appear in URIs the user will see.
+        VerificationUri=$(printf '%s' "$VerificationUri" | sed -e 's,\\/,/,g')
+        VerificationUriComplete=$(printf '%s' "$VerificationUriComplete" | sed -e 's,\\/,/,g')
     fi
 
     if [ -z "$DeviceCodeValue" ] || [ -z "$UserCode" ]; then
