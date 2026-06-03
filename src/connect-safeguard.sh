@@ -7,6 +7,7 @@ USAGE: connect-safeguard.sh [-h]
        connect-safeguard.sh [-a appliance] [-B cabundle] [-v version] [-i provider] [-u user] [-p] [-X]
        connect-safeguard.sh [-a appliance] [-B cabundle] [-v version] -i certificate [-c file] [-k file] [-p] [-X]
        connect-safeguard.sh [-a appliance] [-B cabundle] [-v version] [-i provider] [-u user] [-p] -P [-S] [-X]
+       connect-safeguard.sh [-a appliance] [-B cabundle] [-v version] [-i provider] -D [-X]
 
   -h  Show help and exit
   -a  Network address of the appliance
@@ -21,6 +22,13 @@ USAGE: connect-safeguard.sh [-h]
       This programmatically simulates the browser-based OAuth2/PKCE flow without
       launching a browser, which does not require the Resource Owner password grant
       type to be enabled on the appliance.
+  -D  Use the OAuth 2.0 Device Authorization Grant (RFC 8628) to authenticate
+      without launching a local browser. Displays a verification URL and a short
+      user code; complete the login from any browser on any device. Recommended
+      for headless environments such as Docker containers, SSH sessions, and CI
+      runners. Combine with -i to pre-select an identity provider on the rSTS
+      login page. Requires Safeguard appliance firmware >= 7.4 with the
+      "Device Code" OAuth2 grant type enabled in Appliance Management.
   -S  Secondary password or MFA code (only used with -P when the identity
       provider requires a second factor, will prompt if not provided)
   -X  Do NOT generate login file for use in other scripts
@@ -50,6 +58,7 @@ Cert=
 PKey=
 Pass=
 Pkce=false
+DeviceCode=false
 SecondaryPass=
 StsAccessToken=
 AccessToken=
@@ -371,6 +380,219 @@ EOF
     fi
 }
 
+get_rsts_token_with_device_code()
+{
+    # OAuth 2.0 Device Authorization Grant (RFC 8628). Mirrors the
+    # Get-RstsTokenFromDeviceCode implementation from safeguard-ps.
+    #
+    # We intentionally send an empty client_id. The RSTS bakes a client_id into
+    # the auth-code JWT during the browser-side completion (LoginController),
+    # and that side only picks up a client_id from the URL query string. The
+    # short verification_uri_complete URL we display does not include client_id,
+    # so the JWT ends up signed with the appliance's default ApplicationClientId.
+    # The token-poll then compares the cached client_id (what we sent here) to
+    # the JWT claim. Sending an empty string lets the appliance normalize both
+    # sides to ApplicationClientId, which makes the device flow work whether
+    # the user opens verification_uri_complete or types the user_code on the
+    # long verification_uri page.
+    local DeviceClientId=""
+    local DeviceScope="rsts:sts:primaryproviderid:local"
+
+    local DeviceResponseRaw
+    DeviceResponseRaw=$(curl -K <(cat <<EOF
+-s
+-S
+$CABundleArg
+-X POST
+-H "Accept: application/json"
+-H "Content-type: application/json"
+-w "\n%{http_code}"
+EOF
+) -d @- "https://$Appliance/RSTS/oauth2/DeviceLogin" <<EOF
+{
+    "client_id": "$DeviceClientId",
+    "scope": "$DeviceScope"
+}
+EOF
+    )
+    local CurlExit=$?
+    if [ $CurlExit -ne 0 ]; then
+        >&2 echo "Failed to request device authorization from appliance (curl exit $CurlExit)"
+        >&2 echo "$DeviceResponseRaw"
+        exit 1
+    fi
+
+    local DeviceHttpCode=$(echo "$DeviceResponseRaw" | tail -1)
+    local DeviceResponse=$(echo "$DeviceResponseRaw" | sed '$d')
+    if [ -z "$DeviceHttpCode" ] || [ "${DeviceHttpCode:0:1}" != "2" ]; then
+        >&2 echo "Unable to obtain device code from $Appliance (HTTP $DeviceHttpCode)"
+        # The appliance returns an HTML error page (rather than a JSON OAuth
+        # error body) when the Device Code grant type is disabled or the
+        # endpoint is not recognized. Detect that and surface a focused hint
+        # instead of dumping the entire HTML page to the terminal. The body
+        # may include a UTF-8 BOM and/or an XML prolog before the first '<',
+        # so strip leading whitespace and the BOM before checking.
+        local DeviceTrimmed=$(printf '%s' "$DeviceResponse" | sed -e 's/^\xef\xbb\xbf//' -e 's/^[[:space:]]*//')
+        if [ "${DeviceTrimmed:0:1}" = "<" ]; then
+            >&2 echo "Appliance returned an HTML error page rather than an OAuth response."
+            >&2 echo "The Device Code OAuth2 grant type may not be enabled on this appliance."
+            >&2 echo "Enable it under Appliance Management -> Safeguard Access -> Local Login Control,"
+            >&2 echo "or upgrade to Safeguard 7.4 or later."
+        else
+            >&2 echo "$DeviceResponse"
+        fi
+        exit 1
+    fi
+    if [ -z "$DeviceResponse" ]; then
+        >&2 echo "Unexpected empty device authorization response from $Appliance"
+        exit 1
+    fi
+
+    local DeviceCodeValue UserCode VerificationUri VerificationUriComplete ExpiresIn Interval
+    if [ ! -z "$(which jq 2> /dev/null)" ]; then
+        DeviceCodeValue=$(echo "$DeviceResponse" | jq -r '.device_code // empty' 2> /dev/null)
+        UserCode=$(echo "$DeviceResponse" | jq -r '.user_code // empty' 2> /dev/null)
+        VerificationUri=$(echo "$DeviceResponse" | jq -r '.verification_uri // empty' 2> /dev/null)
+        VerificationUriComplete=$(echo "$DeviceResponse" | jq -r '.verification_uri_complete // empty' 2> /dev/null)
+        ExpiresIn=$(echo "$DeviceResponse" | jq -r '.expires_in // empty' 2> /dev/null)
+        Interval=$(echo "$DeviceResponse" | jq -r '.interval // empty' 2> /dev/null)
+    else
+        DeviceCodeValue=$(echo "$DeviceResponse" | sed -n 's/.*"device_code":"\([^"]*\)".*/\1/p')
+        UserCode=$(echo "$DeviceResponse" | sed -n 's/.*"user_code":"\([^"]*\)".*/\1/p')
+        VerificationUri=$(echo "$DeviceResponse" | sed -n 's/.*"verification_uri":"\([^"]*\)".*/\1/p')
+        VerificationUriComplete=$(echo "$DeviceResponse" | sed -n 's/.*"verification_uri_complete":"\([^"]*\)".*/\1/p')
+        ExpiresIn=$(echo "$DeviceResponse" | sed -n 's/.*"expires_in":\([0-9]*\).*/\1/p')
+        Interval=$(echo "$DeviceResponse" | sed -n 's/.*"interval":\([0-9]*\).*/\1/p')
+        # JSON optionally escapes forward slashes as \/. jq -r unescapes those
+        # automatically, but our raw sed extraction does not, so undo the most
+        # common JSON string escapes that can appear in URIs the user will see.
+        VerificationUri=$(printf '%s' "$VerificationUri" | sed -e 's,\\/,/,g')
+        VerificationUriComplete=$(printf '%s' "$VerificationUriComplete" | sed -e 's,\\/,/,g')
+    fi
+
+    if [ -z "$DeviceCodeValue" ] || [ -z "$UserCode" ]; then
+        >&2 echo "Device authorization response from $Appliance is missing required fields"
+        >&2 echo "$DeviceResponse"
+        exit 1
+    fi
+
+    if [ -z "$ExpiresIn" ]; then
+        ExpiresIn=300
+    fi
+    if [ -z "$Interval" ]; then
+        Interval=5
+    fi
+
+    # Append a provider hint as primaryProviderID so the rSTS skips the
+    # provider drop-down and takes the user straight to that provider's
+    # login page (Login.cs:601-604 in the appliance).
+    if [ ! -z "$Provider" ] && [ "$Provider" != "local" ]; then
+        local EncodedProvider=$(urlencode "$Provider")
+        if [ ! -z "$VerificationUri" ]; then
+            case "$VerificationUri" in
+                *\?*) VerificationUri="${VerificationUri}&primaryProviderID=${EncodedProvider}" ;;
+                *)    VerificationUri="${VerificationUri}?primaryProviderID=${EncodedProvider}" ;;
+            esac
+        fi
+        if [ ! -z "$VerificationUriComplete" ]; then
+            case "$VerificationUriComplete" in
+                *\?*) VerificationUriComplete="${VerificationUriComplete}&primaryProviderID=${EncodedProvider}" ;;
+                *)    VerificationUriComplete="${VerificationUriComplete}?primaryProviderID=${EncodedProvider}" ;;
+            esac
+        fi
+    fi
+
+    >&2 echo
+    >&2 echo "To sign in, use a web browser to open the page:"
+    >&2 echo "    $VerificationUri"
+    >&2 echo "and enter the code:"
+    >&2 echo "    $UserCode"
+    if [ ! -z "$VerificationUriComplete" ]; then
+        >&2 echo "Or open this URL directly to skip entering the code:"
+        >&2 echo "    $VerificationUriComplete"
+    fi
+    >&2 echo "The code expires in $ExpiresIn seconds. Press Ctrl+C to cancel."
+    >&2 echo
+
+    local Now Deadline
+    Now=$(date +%s)
+    Deadline=$((Now + ExpiresIn))
+
+    while [ "$(date +%s)" -lt "$Deadline" ]; do
+        sleep "$Interval"
+
+        local PollResponseRaw PollHttpCode PollBody PollCurlExit
+        PollResponseRaw=$(curl -K <(cat <<EOF
+-s
+-S
+$CABundleArg
+-X POST
+-H "Accept: application/json"
+-H "Content-type: application/json"
+-w "\n%{http_code}"
+EOF
+) -d @- "https://$Appliance/RSTS/oauth2/token" <<EOF
+{
+    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    "device_code": "$DeviceCodeValue",
+    "client_id": "$DeviceClientId"
+}
+EOF
+        )
+        PollCurlExit=$?
+        if [ $PollCurlExit -ne 0 ]; then
+            >&2 echo "Failed to poll device code token endpoint (curl exit $PollCurlExit)"
+            >&2 echo "$PollResponseRaw"
+            exit 1
+        fi
+        PollHttpCode=$(echo "$PollResponseRaw" | tail -1)
+        PollBody=$(echo "$PollResponseRaw" | sed '$d')
+
+        if [ "${PollHttpCode:0:1}" = "2" ]; then
+            StsAccessToken=$(echo "$PollBody" | sed -n 's/.*"access_token":"\([-0-9A-Za-z_\.]*\)".*/\1/p')
+            if [ ! -z "$StsAccessToken" ]; then
+                return 0
+            fi
+            # 2xx without access_token: defensive; keep polling.
+            continue
+        fi
+
+        local OAuthError
+        if [ ! -z "$(which jq 2> /dev/null)" ]; then
+            OAuthError=$(echo "$PollBody" | jq -r '.error // empty' 2> /dev/null)
+        else
+            OAuthError=$(echo "$PollBody" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')
+        fi
+
+        case "$OAuthError" in
+            authorization_pending)
+                continue
+                ;;
+            slow_down)
+                Interval=$((Interval + 5))
+                >&2 echo "Slow down requested by appliance; polling every ${Interval}s"
+                continue
+                ;;
+            access_denied)
+                >&2 echo "Device code authentication was denied."
+                exit 1
+                ;;
+            expired_token)
+                >&2 echo "Device code has expired. Please try again."
+                exit 1
+                ;;
+            *)
+                >&2 echo "Unable to redeem device code (HTTP $PollHttpCode)"
+                >&2 echo "$PollBody"
+                exit 1
+                ;;
+        esac
+    done
+
+    >&2 echo "Device code expired before user authenticated."
+    exit 1
+}
+
 get_safeguard_token()
 {
     if [ ! -z "$StsAccessToken" ]; then
@@ -415,7 +637,7 @@ EOF
 }
 
 
-while getopts ":a:B:v:i:u:c:k:phPS:X" opt; do
+while getopts ":a:B:v:i:u:c:k:phPDS:X" opt; do
     case $opt in
     a)
         Appliance=$OPTARG
@@ -445,6 +667,9 @@ while getopts ":a:B:v:i:u:c:k:phPS:X" opt; do
     P)
         Pkce=true
         ;;
+    D)
+        DeviceCode=true
+        ;;
     S)
         SecondaryPass=$OPTARG
         ;;
@@ -457,11 +682,33 @@ while getopts ":a:B:v:i:u:c:k:phPS:X" opt; do
     esac
 done
 
-require_connect_args
+if $DeviceCode; then
+    if $Pkce; then
+        >&2 echo "DeviceCode (-D) and PKCE (-P) cannot be combined"
+        exit 1
+    fi
+    if [ "$Provider" = "certificate" ]; then
+        >&2 echo "DeviceCode authentication cannot be used with certificate provider"
+        exit 1
+    fi
+    if [ ! -z "$Cert" ] || [ ! -z "$PKey" ]; then
+        >&2 echo "Client certificate options (-c/-k) are not valid with DeviceCode authentication"
+        exit 1
+    fi
+    if [ ! -z "$Pass" ]; then
+        >&2 echo "Warning: password input is ignored when using DeviceCode (-D)"
+        Pass=
+    fi
+    require_device_code_connect_args
+else
+    require_connect_args
+fi
 
 Scope="rsts:sts:primaryproviderid:$Provider"
 
-if $Pkce; then
+if $DeviceCode; then
+    get_rsts_token_with_device_code
+elif $Pkce; then
     if [ "$Provider" = "certificate" ]; then
         >&2 echo "PKCE authentication cannot be used with certificate provider"
         exit 1
@@ -496,6 +743,11 @@ EOF
     if $Pkce; then
         cat <<EOF >> $LoginFile
 Pkce=true
+EOF
+    fi
+    if $DeviceCode; then
+        cat <<EOF >> $LoginFile
+DeviceCode=true
 EOF
     fi
     umask $OldUmask
