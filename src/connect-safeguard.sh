@@ -7,6 +7,7 @@ USAGE: connect-safeguard.sh [-h]
        connect-safeguard.sh [-a appliance] [-B cabundle] [-v version] [-i provider] [-u user] [-p] [-X]
        connect-safeguard.sh [-a appliance] [-B cabundle] [-v version] -i certificate [-c file] [-k file] [-p] [-X]
        connect-safeguard.sh [-a appliance] [-B cabundle] [-v version] [-i provider] [-u user] [-p] -P [-S] [-X]
+       connect-safeguard.sh [-a appliance] [-B cabundle] [-v version] [-i provider] -D [-X]
 
   -h  Show help and exit
   -a  Network address of the appliance
@@ -21,6 +22,13 @@ USAGE: connect-safeguard.sh [-h]
       This programmatically simulates the browser-based OAuth2/PKCE flow without
       launching a browser, which does not require the Resource Owner password grant
       type to be enabled on the appliance.
+  -D  Use the OAuth 2.0 Device Authorization Grant (RFC 8628) to authenticate
+      without launching a local browser. Displays a verification URL and a short
+      user code; complete the login from any browser on any device. Recommended
+      for headless environments such as Docker containers, SSH sessions, and CI
+      runners. Combine with -i to pre-select an identity provider on the rSTS
+      login page. Requires Safeguard appliance firmware >= 8.2 with the
+      "Device Code" OAuth2 grant type enabled in Appliance Management.
   -S  Secondary password or MFA code (only used with -P when the identity
       provider requires a second factor, will prompt if not provided)
   -X  Do NOT generate login file for use in other scripts
@@ -50,6 +58,7 @@ Cert=
 PKey=
 Pass=
 Pkce=false
+DeviceCode=false
 SecondaryPass=
 StsAccessToken=
 AccessToken=
@@ -609,7 +618,7 @@ EOF
 }
 
 
-while getopts ":a:B:v:i:u:c:k:phPS:X" opt; do
+while getopts ":a:B:v:i:u:c:k:phPDS:X" opt; do
     case $opt in
     a)
         Appliance=$OPTARG
@@ -639,6 +648,9 @@ while getopts ":a:B:v:i:u:c:k:phPS:X" opt; do
     P)
         Pkce=true
         ;;
+    D)
+        DeviceCode=true
+        ;;
     S)
         SecondaryPass=$OPTARG
         ;;
@@ -651,11 +663,33 @@ while getopts ":a:B:v:i:u:c:k:phPS:X" opt; do
     esac
 done
 
-require_connect_args
+if $DeviceCode; then
+    if $Pkce; then
+        >&2 echo "DeviceCode (-D) and PKCE (-P) cannot be combined"
+        exit 1
+    fi
+    if [ "$Provider" = "certificate" ]; then
+        >&2 echo "DeviceCode authentication cannot be used with certificate provider"
+        exit 1
+    fi
+    if [ ! -z "$Cert" ] || [ ! -z "$PKey" ]; then
+        >&2 echo "Client certificate options (-c/-k) are not valid with DeviceCode authentication"
+        exit 1
+    fi
+    if [ ! -z "$Pass" ]; then
+        >&2 echo "Warning: password input is ignored when using DeviceCode (-D)"
+        Pass=
+    fi
+    require_device_code_connect_args
+else
+    require_connect_args
+fi
 
 Scope="rsts:sts:primaryproviderid:$Provider"
 
-if $Pkce; then
+if $DeviceCode; then
+    get_rsts_token_with_device_code
+elif $Pkce; then
     if [ "$Provider" = "certificate" ]; then
         >&2 echo "PKCE authentication cannot be used with certificate provider"
         exit 1

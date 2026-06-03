@@ -130,3 +130,26 @@ require_connect_args()
     fi
 }
 
+require_device_code_connect_args()
+{
+    handle_ca_bundle_arg
+    if [ -z "$Appliance" ]; then
+        read -p "Appliance Network Address: " Appliance
+    fi
+    if [ ! -z "$(which jq 2> /dev/null)" ]; then
+        query_providers
+    fi
+    if [ ! -z "$Provider" ] && [ ! -z "$Providers" ]; then
+        if [ -z "$(echo $Providers | jq -c ".[]|select(.Id==\"$Provider\")")" -a -z "$(echo $Providers | jq -c ".[]|select(.DisplayName==\"$Provider\")")" ]; then
+            ProviderPrompt=$(echo $Providers | jq '.|del(.[] | select(.Id == "certificate"))|.[]|"\(.Id) [\(.DisplayName)],"' | xargs echo -n | sed 's/.$//')
+            >&2 echo -e "\nSpecified provider '$Provider' must be one of: ($ProviderPrompt)!\n\n"; print_usage
+        else
+            if [ ! -z "$(echo $Providers | jq -c ".[]|select(.Id==\"$Provider\")")" ]; then
+                Provider=$(echo $Providers | jq -r ".[]|select(.Id==\"$Provider\")|.Id")
+            else
+                Provider=$(echo $Providers | jq -r ".[]|select(.DisplayName==\"$Provider\")|.Id")
+            fi
+        fi
+    fi
+}
+
