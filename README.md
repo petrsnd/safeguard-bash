@@ -198,6 +198,37 @@ A login file has been created.
 > grant type may be disabled by default. If you receive authentication errors
 > using the classic method, use `-P` for PKCE authentication instead.
 
+For headless environments where a local browser is not available -- such as
+Docker containers, remote SSH sessions, or CI runners -- use `-D` to
+authenticate via the OAuth 2.0 Device Authorization Grant (RFC 8628). The
+script displays a verification URL and short user code; you complete the
+login from any browser on any device, and the token is delivered back to
+the shell automatically. This flow supports SSO and multi-factor
+authentication. It requires Safeguard appliance firmware 8.2 or later
+with the **Device Code** OAuth2 grant type enabled under
+*Appliance Management -> Safeguard Access -> Local Login Control*.
+
+```Bash
+$ connect-safeguard.sh -a 10.5.32.162 -D
+
+To sign in, use a web browser to open the page:
+    https://10.5.32.162/RSTS/oauth2/device
+and enter the code:
+    ABCD-1234
+Or open this URL directly to skip entering the code:
+    https://10.5.32.162/RSTS/oauth2/device?user_code=ABCD-1234
+The code expires in 300 seconds. Press Ctrl+C to cancel.
+
+A login file has been created.
+```
+
+You can pre-select an identity provider with `-i` so the user is taken
+straight to that provider's login page instead of choosing from a drop-down:
+
+```Bash
+$ connect-safeguard.sh -a 10.5.32.162 -i extf14 -D
+```
+
 The `connect-safeguard.sh` script will create a login file that includes
 your access token and connection information.  This makes it easier to call
 other scripts without having to retype connection information.  This login
