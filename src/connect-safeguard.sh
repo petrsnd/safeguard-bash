@@ -27,7 +27,7 @@ USAGE: connect-safeguard.sh [-h]
       user code; complete the login from any browser on any device. Recommended
       for headless environments such as Docker containers, SSH sessions, and CI
       runners. Combine with -i to pre-select an identity provider on the rSTS
-      login page. Requires Safeguard appliance firmware >= 8.2 with the
+      login page. Requires Safeguard appliance firmware >= 7.4 with the
       "Device Code" OAuth2 grant type enabled in Appliance Management.
   -S  Secondary password or MFA code (only used with -P when the identity
       provider requires a second factor, will prompt if not provided)
@@ -437,7 +437,7 @@ EOF
             >&2 echo "Appliance returned an HTML error page rather than an OAuth response."
             >&2 echo "The Device Code OAuth2 grant type may not be enabled on this appliance."
             >&2 echo "Enable it under Appliance Management -> Safeguard Access -> Local Login Control,"
-            >&2 echo "or upgrade to Safeguard 8.2 or later."
+            >&2 echo "or upgrade to Safeguard 7.4 or later."
         else
             >&2 echo "$DeviceResponse"
         fi
