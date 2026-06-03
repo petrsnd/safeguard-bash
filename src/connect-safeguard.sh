@@ -429,8 +429,10 @@ EOF
         # The appliance returns an HTML error page (rather than a JSON OAuth
         # error body) when the Device Code grant type is disabled or the
         # endpoint is not recognized. Detect that and surface a focused hint
-        # instead of dumping the entire HTML page to the terminal.
-        local DeviceTrimmed=$(echo "$DeviceResponse" | sed -e 's/^[[:space:]]*//')
+        # instead of dumping the entire HTML page to the terminal. The body
+        # may include a UTF-8 BOM and/or an XML prolog before the first '<',
+        # so strip leading whitespace and the BOM before checking.
+        local DeviceTrimmed=$(printf '%s' "$DeviceResponse" | sed -e 's/^\xef\xbb\xbf//' -e 's/^[[:space:]]*//')
         if [ "${DeviceTrimmed:0:1}" = "<" ]; then
             >&2 echo "Appliance returned an HTML error page rather than an OAuth response."
             >&2 echo "The Device Code OAuth2 grant type may not be enabled on this appliance."
