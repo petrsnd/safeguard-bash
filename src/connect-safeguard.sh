@@ -426,7 +426,19 @@ EOF
     local DeviceResponse=$(echo "$DeviceResponseRaw" | sed '$d')
     if [ -z "$DeviceHttpCode" ] || [ "${DeviceHttpCode:0:1}" != "2" ]; then
         >&2 echo "Unable to obtain device code from $Appliance (HTTP $DeviceHttpCode)"
-        >&2 echo "$DeviceResponse"
+        # The appliance returns an HTML error page (rather than a JSON OAuth
+        # error body) when the Device Code grant type is disabled or the
+        # endpoint is not recognized. Detect that and surface a focused hint
+        # instead of dumping the entire HTML page to the terminal.
+        local DeviceTrimmed=$(echo "$DeviceResponse" | sed -e 's/^[[:space:]]*//')
+        if [ "${DeviceTrimmed:0:1}" = "<" ]; then
+            >&2 echo "Appliance returned an HTML error page rather than an OAuth response."
+            >&2 echo "The Device Code OAuth2 grant type may not be enabled on this appliance."
+            >&2 echo "Enable it under Appliance Management -> Safeguard Access -> Local Login Control,"
+            >&2 echo "or upgrade to Safeguard 8.2 or later."
+        else
+            >&2 echo "$DeviceResponse"
+        fi
         exit 1
     fi
     if [ -z "$DeviceResponse" ]; then
