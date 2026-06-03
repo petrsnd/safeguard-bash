@@ -371,6 +371,200 @@ EOF
     fi
 }
 
+get_rsts_token_with_device_code()
+{
+    # OAuth 2.0 Device Authorization Grant (RFC 8628). Mirrors the
+    # Get-RstsTokenFromDeviceCode implementation from safeguard-ps.
+    #
+    # We intentionally send an empty client_id. The RSTS bakes a client_id into
+    # the auth-code JWT during the browser-side completion (LoginController),
+    # and that side only picks up a client_id from the URL query string. The
+    # short verification_uri_complete URL we display does not include client_id,
+    # so the JWT ends up signed with the appliance's default ApplicationClientId.
+    # The token-poll then compares the cached client_id (what we sent here) to
+    # the JWT claim. Sending an empty string lets the appliance normalize both
+    # sides to ApplicationClientId, which makes the device flow work whether
+    # the user opens verification_uri_complete or types the user_code on the
+    # long verification_uri page.
+    local DeviceClientId=""
+    local DeviceScope="rsts:sts:primaryproviderid:local"
+
+    local DeviceResponseRaw
+    DeviceResponseRaw=$(curl -K <(cat <<EOF
+-s
+-S
+$CABundleArg
+-X POST
+-H "Accept: application/json"
+-H "Content-type: application/json"
+-w "\n%{http_code}"
+EOF
+) -d @- "https://$Appliance/RSTS/oauth2/DeviceLogin" <<EOF
+{
+    "client_id": "$DeviceClientId",
+    "scope": "$DeviceScope"
+}
+EOF
+    )
+    local CurlExit=$?
+    if [ $CurlExit -ne 0 ]; then
+        >&2 echo "Failed to request device authorization from appliance (curl exit $CurlExit)"
+        >&2 echo "$DeviceResponseRaw"
+        exit 1
+    fi
+
+    local DeviceHttpCode=$(echo "$DeviceResponseRaw" | tail -1)
+    local DeviceResponse=$(echo "$DeviceResponseRaw" | sed '$d')
+    if [ -z "$DeviceHttpCode" ] || [ "${DeviceHttpCode:0:1}" != "2" ]; then
+        >&2 echo "Unable to obtain device code from $Appliance (HTTP $DeviceHttpCode)"
+        >&2 echo "$DeviceResponse"
+        exit 1
+    fi
+    if [ -z "$DeviceResponse" ]; then
+        >&2 echo "Unexpected empty device authorization response from $Appliance"
+        exit 1
+    fi
+
+    local DeviceCodeValue UserCode VerificationUri VerificationUriComplete ExpiresIn Interval
+    if [ ! -z "$(which jq 2> /dev/null)" ]; then
+        DeviceCodeValue=$(echo "$DeviceResponse" | jq -r '.device_code // empty' 2> /dev/null)
+        UserCode=$(echo "$DeviceResponse" | jq -r '.user_code // empty' 2> /dev/null)
+        VerificationUri=$(echo "$DeviceResponse" | jq -r '.verification_uri // empty' 2> /dev/null)
+        VerificationUriComplete=$(echo "$DeviceResponse" | jq -r '.verification_uri_complete // empty' 2> /dev/null)
+        ExpiresIn=$(echo "$DeviceResponse" | jq -r '.expires_in // empty' 2> /dev/null)
+        Interval=$(echo "$DeviceResponse" | jq -r '.interval // empty' 2> /dev/null)
+    else
+        DeviceCodeValue=$(echo "$DeviceResponse" | sed -n 's/.*"device_code":"\([^"]*\)".*/\1/p')
+        UserCode=$(echo "$DeviceResponse" | sed -n 's/.*"user_code":"\([^"]*\)".*/\1/p')
+        VerificationUri=$(echo "$DeviceResponse" | sed -n 's/.*"verification_uri":"\([^"]*\)".*/\1/p')
+        VerificationUriComplete=$(echo "$DeviceResponse" | sed -n 's/.*"verification_uri_complete":"\([^"]*\)".*/\1/p')
+        ExpiresIn=$(echo "$DeviceResponse" | sed -n 's/.*"expires_in":\([0-9]*\).*/\1/p')
+        Interval=$(echo "$DeviceResponse" | sed -n 's/.*"interval":\([0-9]*\).*/\1/p')
+    fi
+
+    if [ -z "$DeviceCodeValue" ] || [ -z "$UserCode" ]; then
+        >&2 echo "Device authorization response from $Appliance is missing required fields"
+        >&2 echo "$DeviceResponse"
+        exit 1
+    fi
+
+    if [ -z "$ExpiresIn" ]; then
+        ExpiresIn=300
+    fi
+    if [ -z "$Interval" ]; then
+        Interval=5
+    fi
+
+    # Append a provider hint as primaryProviderID so the rSTS skips the
+    # provider drop-down and takes the user straight to that provider's
+    # login page (Login.cs:601-604 in the appliance).
+    if [ ! -z "$Provider" ] && [ "$Provider" != "local" ]; then
+        local EncodedProvider=$(urlencode "$Provider")
+        if [ ! -z "$VerificationUri" ]; then
+            case "$VerificationUri" in
+                *\?*) VerificationUri="${VerificationUri}&primaryProviderID=${EncodedProvider}" ;;
+                *)    VerificationUri="${VerificationUri}?primaryProviderID=${EncodedProvider}" ;;
+            esac
+        fi
+        if [ ! -z "$VerificationUriComplete" ]; then
+            case "$VerificationUriComplete" in
+                *\?*) VerificationUriComplete="${VerificationUriComplete}&primaryProviderID=${EncodedProvider}" ;;
+                *)    VerificationUriComplete="${VerificationUriComplete}?primaryProviderID=${EncodedProvider}" ;;
+            esac
+        fi
+    fi
+
+    >&2 echo
+    >&2 echo "To sign in, use a web browser to open the page:"
+    >&2 echo "    $VerificationUri"
+    >&2 echo "and enter the code:"
+    >&2 echo "    $UserCode"
+    if [ ! -z "$VerificationUriComplete" ]; then
+        >&2 echo "Or open this URL directly to skip entering the code:"
+        >&2 echo "    $VerificationUriComplete"
+    fi
+    >&2 echo "The code expires in $ExpiresIn seconds. Press Ctrl+C to cancel."
+    >&2 echo
+
+    local Now Deadline
+    Now=$(date +%s)
+    Deadline=$((Now + ExpiresIn))
+
+    while [ "$(date +%s)" -lt "$Deadline" ]; do
+        sleep "$Interval"
+
+        local PollResponseRaw PollHttpCode PollBody PollCurlExit
+        PollResponseRaw=$(curl -K <(cat <<EOF
+-s
+-S
+$CABundleArg
+-X POST
+-H "Accept: application/json"
+-H "Content-type: application/json"
+-w "\n%{http_code}"
+EOF
+) -d @- "https://$Appliance/RSTS/oauth2/token" <<EOF
+{
+    "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+    "device_code": "$DeviceCodeValue",
+    "client_id": "$DeviceClientId"
+}
+EOF
+        )
+        PollCurlExit=$?
+        if [ $PollCurlExit -ne 0 ]; then
+            >&2 echo "Failed to poll device code token endpoint (curl exit $PollCurlExit)"
+            >&2 echo "$PollResponseRaw"
+            exit 1
+        fi
+        PollHttpCode=$(echo "$PollResponseRaw" | tail -1)
+        PollBody=$(echo "$PollResponseRaw" | sed '$d')
+
+        if [ "${PollHttpCode:0:1}" = "2" ]; then
+            StsAccessToken=$(echo "$PollBody" | sed -n 's/.*"access_token":"\([-0-9A-Za-z_\.]*\)".*/\1/p')
+            if [ ! -z "$StsAccessToken" ]; then
+                return 0
+            fi
+            # 2xx without access_token: defensive; keep polling.
+            continue
+        fi
+
+        local OAuthError
+        if [ ! -z "$(which jq 2> /dev/null)" ]; then
+            OAuthError=$(echo "$PollBody" | jq -r '.error // empty' 2> /dev/null)
+        else
+            OAuthError=$(echo "$PollBody" | sed -n 's/.*"error":"\([^"]*\)".*/\1/p')
+        fi
+
+        case "$OAuthError" in
+            authorization_pending)
+                continue
+                ;;
+            slow_down)
+                Interval=$((Interval + 5))
+                >&2 echo "Slow down requested by appliance; polling every ${Interval}s"
+                continue
+                ;;
+            access_denied)
+                >&2 echo "Device code authentication was denied."
+                exit 1
+                ;;
+            expired_token)
+                >&2 echo "Device code has expired. Please try again."
+                exit 1
+                ;;
+            *)
+                >&2 echo "Unable to redeem device code (HTTP $PollHttpCode)"
+                >&2 echo "$PollBody"
+                exit 1
+                ;;
+        esac
+    done
+
+    >&2 echo "Device code expired before user authenticated."
+    exit 1
+}
+
 get_safeguard_token()
 {
     if [ ! -z "$StsAccessToken" ]; then
