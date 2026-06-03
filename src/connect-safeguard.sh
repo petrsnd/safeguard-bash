@@ -726,6 +726,11 @@ EOF
 Pkce=true
 EOF
     fi
+    if $DeviceCode; then
+        cat <<EOF >> $LoginFile
+DeviceCode=true
+EOF
+    fi
     umask $OldUmask
     >&2 echo "A login file has been created."
 else
